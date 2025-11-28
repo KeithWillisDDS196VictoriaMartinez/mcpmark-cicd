@@ -1,0 +1,203 @@
+name: PR Automation Workflow
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  code-quality:
+    name: code-quality
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run ESLint
+        id: eslint
+        run: npm run lint || echo "eslint_failed=true" >> $GITHUB_OUTPUT
+
+      - name: Run Prettier check
+        id: prettier
+        run: npx prettier --check . || echo "prettier_failed=true" >> $GITHUB_OUTPUT
+
+      - name: Post Code Quality Report
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const eslintFailed = '${{ steps.eslint.outputs.eslint_failed }}' === 'true';
+            const prettierFailed = '${{ steps.prettier.outputs.prettier_failed }}' === 'true';
+            let body = '## Code Quality Report\n\n';
+            body += '### ESLint Checks: ' + (eslintFailed ? '❌ Failed' : '✅ Passed') + '\n';
+            body += '### Prettier Formatting: ' + (prettierFailed ? '❌ Failed' : '✅ Passed') + '\n';
+            if (eslintFailed || prettierFailed) {
+              body += '\nPlease fix the above issues before merging.';
+            }
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });
+
+  testing-suite:
+    name: testing-suite
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run test suite with coverage
+        id: test
+        run: npm test -- --coverage || echo "test_failed=true" >> $GITHUB_OUTPUT
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+
+      - name: Post Test Coverage Report
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const testFailed = '${{ steps.test.outputs.test_failed }}' === 'true';
+            let body = '## Test Coverage Report\n\n';
+            if (testFailed) {
+              body += '❌ Test suite failed. Please fix the failing tests.\n';
+            } else {
+              body += '✅ Test suite passed.\n';
+              body += 'Coverage report artifact uploaded. Download to view detailed coverage.\n';
+            }
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });
+
+  security-scan:
+    name: security-scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run dependency vulnerability check
+        id: npm-audit
+        run: npm audit --audit-level moderate || echo "vulnerabilities_found=true" >> $GITHUB_OUTPUT
+
+      - name: Scan for secrets
+        id: secret-scan
+        uses: trufflesecurity/trufflehog@v3
+        with:
+          path: ./
+          base: ${{ github.event.pull_request.base.sha }}
+          head: ${{ github.event.pull_request.head.sha }}
+          fail: false
+        continue-on-error: true
+
+      - name: Post Security Scan Report
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const vulnerabilitiesFound = '${{ steps.npm-audit.outputs.vulnerabilities_found }}' === 'true';
+            const secretsFound = '${{ steps.secret-scan.outputs.found }}' === 'true';
+            let body = '## Security Scan Report\n\n';
+            body += '### Dependencies Vulnerabilities: ' + (vulnerabilitiesFound ? '❌ Found' : '✅ None') + '\n';
+            body += '### Secrets Scan: ' + (secretsFound ? '❌ Secrets detected' : '✅ No secrets found') + '\n';
+            if (vulnerabilitiesFound || secretsFound) {
+              body += '\nPlease address the security issues before merging.';
+            }
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });
+
+  build-validation:
+    name: build-validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build application
+        id: build
+        run: npm run build || echo "build_failed=true" >> $GITHUB_OUTPUT
+
+      - name: Validate endpoints (example)
+        id: endpoints
+        run: |
+          if [ -d dist ]; then
+            npx serve dist &
+            sleep 5
+            curl -f http://localhost:3000 || echo "endpoint_failed=true" >> $GITHUB_OUTPUT
+            kill %1
+          else
+            echo "No dist directory found, skipping endpoint validation"
+          fi
+        continue-on-error: true
+
+      - name: Upload deployment preview artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-preview
+          path: dist/
+
+      - name: Post Build Validation
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const buildFailed = '${{ steps.build.outputs.build_failed }}' === 'true';
+            const endpointFailed = '${{ steps.endpoints.outputs.endpoint_failed }}' === 'true';
+            let body = '## Build Validation\n\n';
+            body += '### Application Build: ' + (buildFailed ? '❌ Failed' : '✅ Passed') + '\n';
+            body += '### Endpoint Validation: ' + (endpointFailed ? '❌ Failed' : '✅ Passed') + '\n';
+            if (buildFailed || endpointFailed) {
+              body += '\nPlease fix the build or endpoint issues before merging.';
+            } else {
+              body += 'Deployment preview artifact uploaded.';
+            }
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });
